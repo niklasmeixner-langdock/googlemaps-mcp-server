@@ -45,98 +45,14 @@ app.use(express.urlencoded({ extended: true }));
 
 const oauthProvider = new GoogleMapsOAuthProvider();
 
-function baseUrl(): string {
-  return getBaseUrl();
-}
-
 // ---------------------------------------------------------------------------
-// OAuth Endpoints
+// Health (registered first so it's never blocked by auth middleware)
 // ---------------------------------------------------------------------------
 
-app.get("/authorize", (req: Request, res: Response) => {
-  const { client_id, redirect_uri, state, code_challenge } = req.query;
-
-  if (!client_id || !redirect_uri || !code_challenge) {
-    res.status(400).json({
-      error: "invalid_request",
-      error_description: "Missing required parameters",
-    });
-    return;
-  }
-
-  const sessionId = crypto.randomUUID();
-
-  storeAuthorizationSession(sessionId, {
-    clientId: client_id as string,
-    codeChallenge: code_challenge as string,
-    redirectUri: redirect_uri as string,
-    state: state as string | undefined,
-  });
-
-  const googleClientId = process.env.GOOGLE_CLIENT_ID;
-
-  const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
-  authUrl.searchParams.set("response_type", "code");
-  authUrl.searchParams.set("client_id", googleClientId!);
-  authUrl.searchParams.set("redirect_uri", `${baseUrl()}/oauth/callback`);
-  authUrl.searchParams.set("state", sessionId);
-  authUrl.searchParams.set("code_challenge", code_challenge as string);
-  authUrl.searchParams.set("code_challenge_method", "S256");
-  authUrl.searchParams.set("scope", "openid profile email");
-  authUrl.searchParams.set("access_type", "offline");
-  authUrl.searchParams.set("prompt", "consent");
-
-  res.redirect(authUrl.toString());
-});
-
-// Lazy-init the auth router on first request so the app boots without BASE_URL
-let authRouterInstance: ReturnType<typeof mcpAuthRouter> | null = null;
-app.use("/", (req: Request, res: Response, next) => {
-  if (!authRouterInstance) {
-    authRouterInstance = mcpAuthRouter({
-      provider: oauthProvider,
-      issuerUrl: new URL(baseUrl()),
-      baseUrl: new URL(baseUrl()),
-      scopesSupported: ["openid", "profile", "email"],
-      resourceName: "Google Maps MCP Server",
-    });
-  }
-  authRouterInstance!(req, res, next);
-});
-
-app.get("/oauth/callback", (req: Request, res: Response) => {
-  const { code, state, error, error_description } = req.query;
-
-  if (error) {
-    res.status(400).json({ error, error_description });
-    return;
-  }
-
-  if (!state || typeof state !== "string") {
-    res.status(400).json({ error: "missing_state" });
-    return;
-  }
-
-  const session = getAuthorizationSession(state);
-  if (!session) {
-    res.status(400).json({ error: "invalid_state" });
-    return;
-  }
-
-  const redirectUrl = new URL(session.redirectUri);
-  if (code) {
-    redirectUrl.searchParams.set("code", code as string);
-  }
-  if (session.state) {
-    redirectUrl.searchParams.set("state", session.state);
-  }
-
-  deleteAuthorizationSession(state);
-  res.redirect(redirectUrl.toString());
-});
+app.get("/health", (_req, res) => res.json({ status: "ok" }));
 
 // ---------------------------------------------------------------------------
-// MCP Endpoint
+// MCP Endpoint (registered before auth middleware)
 // ---------------------------------------------------------------------------
 
 app.all("/mcp", async (req: Request, res: Response) => {
@@ -171,7 +87,104 @@ app.all("/mcp", async (req: Request, res: Response) => {
   }
 });
 
-app.get("/health", (_req, res) => res.json({ status: "ok" }));
+// ---------------------------------------------------------------------------
+// OAuth Endpoints (only active when Google OAuth credentials are configured)
+// ---------------------------------------------------------------------------
+
+app.get("/authorize", (req: Request, res: Response) => {
+  const { client_id, redirect_uri, state, code_challenge } = req.query;
+
+  if (!client_id || !redirect_uri || !code_challenge) {
+    res.status(400).json({
+      error: "invalid_request",
+      error_description: "Missing required parameters",
+    });
+    return;
+  }
+
+  const sessionId = crypto.randomUUID();
+
+  storeAuthorizationSession(sessionId, {
+    clientId: client_id as string,
+    codeChallenge: code_challenge as string,
+    redirectUri: redirect_uri as string,
+    state: state as string | undefined,
+  });
+
+  const googleClientId = process.env.GOOGLE_CLIENT_ID;
+
+  const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("client_id", googleClientId!);
+  authUrl.searchParams.set("redirect_uri", `${getBaseUrl()}/oauth/callback`);
+  authUrl.searchParams.set("state", sessionId);
+  authUrl.searchParams.set("code_challenge", code_challenge as string);
+  authUrl.searchParams.set("code_challenge_method", "S256");
+  authUrl.searchParams.set("scope", "openid profile email");
+  authUrl.searchParams.set("access_type", "offline");
+  authUrl.searchParams.set("prompt", "consent");
+
+  res.redirect(authUrl.toString());
+});
+
+// Lazy-init auth router — skipped entirely if BASE_URL is not available
+let authRouterInstance: ReturnType<typeof mcpAuthRouter> | null = null;
+let authRouterFailed = false;
+app.use("/", (req: Request, res: Response, next) => {
+  if (authRouterFailed) {
+    next();
+    return;
+  }
+  if (!authRouterInstance) {
+    try {
+      const base = getBaseUrl();
+      authRouterInstance = mcpAuthRouter({
+        provider: oauthProvider,
+        issuerUrl: new URL(base),
+        baseUrl: new URL(base),
+        scopesSupported: ["openid", "profile", "email"],
+        resourceName: "Google Maps MCP Server",
+      });
+    } catch {
+      console.warn("OAuth auth router not initialized (BASE_URL not set). OAuth disabled.");
+      authRouterFailed = true;
+      next();
+      return;
+    }
+  }
+  authRouterInstance!(req, res, next);
+});
+
+app.get("/oauth/callback", (req: Request, res: Response) => {
+  const { code, state, error, error_description } = req.query;
+
+  if (error) {
+    res.status(400).json({ error, error_description });
+    return;
+  }
+
+  if (!state || typeof state !== "string") {
+    res.status(400).json({ error: "missing_state" });
+    return;
+  }
+
+  const session = getAuthorizationSession(state);
+  if (!session) {
+    res.status(400).json({ error: "invalid_state" });
+    return;
+  }
+
+  const redirectUrl = new URL(session.redirectUri);
+  if (code) {
+    redirectUrl.searchParams.set("code", code as string);
+  }
+  if (session.state) {
+    redirectUrl.searchParams.set("state", session.state);
+  }
+
+  deleteAuthorizationSession(state);
+  res.redirect(redirectUrl.toString());
+});
 
 // ---------------------------------------------------------------------------
 // MCP Server Factory
@@ -540,8 +553,6 @@ function createMcpServer(
 
 app.listen(PORT, () => {
   console.log(`Google Maps MCP Server running on port ${PORT}`);
-  console.log(
-    `OAuth endpoints: /.well-known/oauth-authorization-server, /register, /authorize, /token`,
-  );
   console.log(`MCP endpoint: /mcp`);
+  console.log(`Health check: /health`);
 });
