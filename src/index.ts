@@ -146,21 +146,8 @@ app.all("/mcp", async (req: Request, res: Response) => {
       ? authHeader.slice(7)
       : null;
 
-    // Return 401 to trigger OAuth flow in MCP clients
-    if (!token) {
-      res.status(401).json({
-        jsonrpc: "2.0",
-        error: {
-          code: -32001,
-          message: "Unauthorized - OAuth authentication required",
-        },
-        id: null,
-      });
-      return;
-    }
-
     const customHeaders = extractCustomHeaders(req.headers);
-    const server = createMcpServer(token, customHeaders);
+    const server = createMcpServer(token ?? "", customHeaders);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
