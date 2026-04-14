@@ -43,8 +43,11 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-const baseUrl = getBaseUrl();
 const oauthProvider = new GoogleMapsOAuthProvider();
+
+function baseUrl(): string {
+  return getBaseUrl();
+}
 
 // ---------------------------------------------------------------------------
 // OAuth Endpoints
@@ -75,7 +78,7 @@ app.get("/authorize", (req: Request, res: Response) => {
   const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
   authUrl.searchParams.set("response_type", "code");
   authUrl.searchParams.set("client_id", googleClientId!);
-  authUrl.searchParams.set("redirect_uri", `${baseUrl}/oauth/callback`);
+  authUrl.searchParams.set("redirect_uri", `${baseUrl()}/oauth/callback`);
   authUrl.searchParams.set("state", sessionId);
   authUrl.searchParams.set("code_challenge", code_challenge as string);
   authUrl.searchParams.set("code_challenge_method", "S256");
@@ -86,14 +89,20 @@ app.get("/authorize", (req: Request, res: Response) => {
   res.redirect(authUrl.toString());
 });
 
-const authRouter = mcpAuthRouter({
-  provider: oauthProvider,
-  issuerUrl: new URL(baseUrl),
-  baseUrl: new URL(baseUrl),
-  scopesSupported: ["openid", "profile", "email"],
-  resourceName: "Google Maps MCP Server",
+// Lazy-init the auth router on first request so the app boots without BASE_URL
+let authRouterInstance: ReturnType<typeof mcpAuthRouter> | null = null;
+app.use("/", (req: Request, res: Response, next) => {
+  if (!authRouterInstance) {
+    authRouterInstance = mcpAuthRouter({
+      provider: oauthProvider,
+      issuerUrl: new URL(baseUrl()),
+      baseUrl: new URL(baseUrl()),
+      scopesSupported: ["openid", "profile", "email"],
+      resourceName: "Google Maps MCP Server",
+    });
+  }
+  authRouterInstance!(req, res, next);
 });
-app.use("/", authRouter);
 
 app.get("/oauth/callback", (req: Request, res: Response) => {
   const { code, state, error, error_description } = req.query;
